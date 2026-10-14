@@ -1,0 +1,238 @@
+version: "3.9"
+
+# ============================================
+# NETWORKS (Hardening: network isolation)
+# ============================================
+networks:
+  frontend:
+    driver: bridge
+  backend:
+    driver: bridge
+    internal: true          # DB + exporter không ra Internet
+
+# ============================================
+# VOLUMES
+# ============================================
+volumes:
+  mysql_data:
+  wp_data:
+  nginx_logs:
+  prom_data:
+  grafana_data:
+  loki_data:
+
+# ============================================
+# SERVICES
+# ============================================
+services:
+
+  # ==================== MySQL ====================
+  mysql:
+    image: mysql:8.0
+    container_name: blog_mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./mysql/init:/docker-entrypoint-initdb.d:ro
+    networks:
+      - backend
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # ==================== WordPress ====================
+  wordpress:
+    image: wordpress:6.4-php8.2-fpm-alpine
+    container_name: blog_wordpress
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      WORDPRESS_DB_HOST: ${WORDPRESS_DB_HOST}
+      WORDPRESS_DB_NAME: ${WORDPRESS_DB_NAME}
+      WORDPRESS_DB_USER: ${WORDPRESS_DB_USER}
+      WORDPRESS_DB_PASSWORD: ${WORDPRESS_DB_PASSWORD}
+      WORDPRESS_TABLE_PREFIX: ${WORDPRESS_TABLE_PREFIX}
+    volumes:
+      - wp_data:/var/www/html
+    networks:
+      - backend
+      - frontend
+    security_opt:
+      - no-new-privileges:true
+
+  # ==================== phpMyAdmin ====================
+  phpmyadmin:
+    image: phpmyadmin:5.2-apache
+    container_name: blog_phpmyadmin
+    restart: unless-stopped
+    depends_on:
+      - mysql
+    environment:
+      PMA_HOST: mysql
+      PMA_PORT: 3306
+      UPLOAD_LIMIT: 64M
+    networks:
+      - backend
+      - frontend
+    security_opt:
+      - no-new-privileges:true
+
+  # ==================== Nginx Reverse Proxy ====================
+  nginx:
+    image: nginx:1.25-alpine
+    container_name: blog_nginx
+    restart: unless-stopped
+    depends_on:
+      - wordpress
+      - phpmyadmin
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+      - wp_data:/var/www/html:ro
+      - nginx_logs:/var/log/nginx
+    networks:
+      - frontend
+      - backend
+    security_opt:
+      - no-new-privileges:true
+
+  # ==================== Prometheus ====================
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    container_name: blog_prometheus
+    restart: unless-stopped
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=15d'
+    ports:
+      - "9090:9090"
+    networks:
+      - backend
+      - frontend
+    security_opt:
+      - no-new-privileges:true
+
+  # ==================== Grafana ====================
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: blog_grafana
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+      - loki
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GF_SECURITY_ADMIN_USER}
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_INSTALL_PLUGINS: ""
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    ports:
+      - "3000:3000"
+    networks:
+      - backend
+      - frontend
+    security_opt:
+      - no-new-privileges:true
+
+  # ==================== cAdvisor (container metrics) ====================
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: blog_cadvisor
+    restart: unless-stopped
+    privileged: true
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    networks:
+      - backend
+    security_opt:
+      - no-new-privileges:true
+    devices:
+      - /dev/kmsg:/dev/kmsg
+
+  # ==================== Nginx Exporter ====================
+  nginx-exporter:
+    image: nginx/nginx-prometheus-exporter:1.1.0
+    container_name: blog_nginx_exporter
+    restart: unless-stopped
+    command:
+      - '-nginx.scrape-uri=http://nginx:80/stub_status'
+    networks:
+      - backend
+    security_opt:
+      - no-new-privileges:true
+
+  # ==================== MySQL Exporter ====================
+  mysqld-exporter:
+    image: prom/mysqld-exporter:v0.15.1
+    container_name: blog_mysqld_exporter
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      DATA_SOURCE_NAME: "${MYSQL_USER}:${MYSQL_PASSWORD}@(mysql:3306)/"
+    networks:
+      - backend
+    security_opt:
+      - no-new-privileges:true
+
+  # ==================== Loki (log aggregation) ====================
+  loki:
+    image: grafana/loki:2.9.6
+    container_name: blog_loki
+    restart: unless-stopped
+    volumes:
+      - ./loki/loki-config.yml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    ports:
+      - "3100:3100"
+    networks:
+      - backend
+      - frontend
+    security_opt:
+      - no-new-privileges:true
+
+  # ==================== Promtail (log collector) ====================
+  promtail:
+    image: grafana/promtail:2.9.6
+    container_name: blog_promtail
+    restart: unless-stopped
+    depends_on:
+      - loki
+    volumes:
+      - ./promtail/promtail-config.yml:/etc/promtail/config.yml:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - //var/run/docker.sock:/var/run/docker.sock:ro
+      - nginx_logs:/var/log/nginx:ro
+    command: -config.file=/etc/promtail/config.yml
+    networks:
+      - backend
+    security_opt:
+      - no-new-privileges:true

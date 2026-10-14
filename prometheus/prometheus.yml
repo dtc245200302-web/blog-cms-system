@@ -1,0 +1,42 @@
+# ============================================
+# Prometheus Configuration
+# ============================================
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: 'blog-cms-monitor'
+
+# ============================================
+# Scrape configs - Thu thập metrics từ các target
+# ============================================
+scrape_configs:
+
+  # --- Prometheus tự scrape chính nó ---
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+        labels:
+          service: 'prometheus'
+
+  # --- cAdvisor: metrics của tất cả container ---
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']
+        labels:
+          service: 'cadvisor'
+
+  # --- Nginx: metrics request, connection ---
+  - job_name: 'nginx'
+    static_configs:
+      - targets: ['nginx-exporter:9113']
+        labels:
+          service: 'nginx'
+
+  # --- MySQL: metrics query, connection, buffer pool ---
+  - job_name: 'mysql'
+    static_configs:
+      - targets: ['mysqld-exporter:9104']
+        labels:
+          service: 'mysql'
