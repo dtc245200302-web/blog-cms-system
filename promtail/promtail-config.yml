@@ -35,11 +35,11 @@ scrape_configs:
   # ============================================
   # Job 2: Thu thập log Nginx từ file
   # ============================================
-  - job_name: nginx
+  - job_name: nginx-errors
     static_configs:
       - targets:
           - localhost
         labels:
-          job: nginx
+          job: nginx-errors
           service: nginx
-          __path__: /var/log/nginx/*.log
+          __path__: /var/log/nginx/*.error.log
